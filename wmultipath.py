@@ -142,7 +142,7 @@ class find_route(DynamicPolicy):
         self.set_initial_state()
 
     def set_initial_state(self):
-        self.query = packets(1, ['srcmac', 'dstmac', 'srcip', 'dstip'])
+        self.query = packets(1, ['srcmac','dstmac', 'srcip', 'dstip', 'protocol', 'ethtype', 'srcport', 'dstport'])
         self.query.register_callback(self.myroute)
         self.forward = self.flood
         self.update_policy()
@@ -157,27 +157,20 @@ class find_route(DynamicPolicy):
         # print pkt['srcmac'], pkt['dstmac'], pkt['srcip'], pkt['dstip']
         if (pkt['srcmac'] not in myhost.keys()) or (pkt['dstmac'] not in myhost.keys()):
             return
-        # try:
-        # 	path = min_route[myhost[pkt['srcmac']][0]][myhost[pkt['dstmac']][0]]
-        # except KeyError:
-        # 	get_paths(myhost[pkt['srcmac']][0],myhost[pkt['dstmac']][0])
-        # 	while myhost[pkt['srcmac']][0] not in min_route.keys(): pass
-        # 	while myhost[pkt['dstmac']][0] not in min_route[myhost[pkt['srcmac']][0]].keys(): pass
-        # 	print myhost[pkt['srcmac']][0],",",myhost[pkt['dstmac']][0]
-        # 	path = min_route[myhost[pkt['srcmac']][0]][myhost[pkt['dstmac']][0]]
-        # path.append((myhost[pkt['dstmac']][0],myhost[pkt['dstmac']][1]))
+        
         path = get_least_cost_route(myhost[pkt['srcmac']][0], myhost[pkt['dstmac']][0], myhost[pkt['dstmac']][1])
 
         print "Jalur terbaik : ", path
-
-        r1 = parallel([(match(switch=a, srcip=pkt['srcip'], dstip=pkt['dstip']) >> fwd(b))
-                      for a, b in path])
-        # print r1
-
-        self.forward = if_(
-            match(dstip=pkt['dstip'], srcip=pkt['srcip']), r1, self.forward)
+		
+        if pkt['protocol'] == 1:
+            r1 = parallel([(match(switch=a, srcip=pkt['srcip'], dstip=pkt['dstip']) >> fwd(b))
+                        for a, b in path])
+            self.forward = if_(
+                        match(dstip=pkt['dstip'], srcip=pkt['srcip']), r1, self.forward)
+        else:
+            r1 = parallel([(match(switch=a,ethtype=pkt['ethtype'],srcip=pkt['srcip'],dstip=pkt['dstip'], protocol=pkt['protocol'], srcport=pkt['srcport'],dstport=pkt['dstport']) >> fwd(b)) for a,b in p1])
+            self.forward = if_(match(ethtype=pkt['ethtype'],dstip=pkt['dstip'],srcip=pkt['srcip'], protocol=pkt['protocol'], srcport=pkt['srcport'],dstport=pkt['dstport']),r1,self.forward)
         self.update_policy()
-        time.sleep(1)
 
 def find_host():
     q = packets(1, ['srcmac'])
