@@ -207,12 +207,12 @@ class ProjectController(app_manager.RyuApp):
             ofp_parser = dp.ofproto_parser
             match = ofp_parser.OFPMatch(eth_src=mac_src, eth_dst=mac_dst)
 
-            out_ports = []
+            out_ports = set()
             actions = []
 
             for path in paths_with_ports:
                 if node in path:
-                    out_ports.append(path[node])
+                    out_ports.add(path[node])
 
             if len(out_ports) > 1:
                 group_id = None
@@ -224,6 +224,7 @@ class ProjectController(app_manager.RyuApp):
                 group_id = multipath_group_ids[node, src, dst]
 
                 buckets = []
+                print "node at ",node," out ports : ",out_ports
                 for port in out_ports:
                     bucket_weight = 10
                     bucket_action = [ofp_parser.OFPActionOutput(port)]
@@ -264,7 +265,7 @@ class ProjectController(app_manager.RyuApp):
                     # Sending OUTPUT Rules
             elif len(out_ports) == 1:
                 # print 'Match for %s from %s to %s out_ports %d' % (node, src, dst, out_ports[0])
-                actions = [ofp_parser.OFPActionOutput(out_ports[0])]
+                actions = [ofp_parser.OFPActionOutput(list(out_ports)[0])]
 
                 inst = [ofp_parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
                 mod = ofp_parser.OFPFlowMod(
