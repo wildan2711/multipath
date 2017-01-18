@@ -8,7 +8,7 @@ from ryu.lib.mac import haddr_to_bin
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ether_types
-from ryu.lib import mac
+from ryu.lib import mac, hub
 from ryu.topology.api import get_switch, get_link
 from ryu.app.wsgi import ControllerBase
 from ryu.topology import event, switches
@@ -85,7 +85,7 @@ def measure_link(thread):
                 except KeyError:
                     pass
                 # print switch,thr[switch]
-        time.sleep(1)
+        hub.sleep(1)
 
 
 def path_cost(route):
@@ -125,6 +125,9 @@ def get_paths(src, dst):
                     stack.append((next, path + [next]))
         topology_map[src][dst] = paths
         print "Jalur yg tersedia dari ",src, " ",dst," : ", topology_map[src][dst]
+
+def get_link_cost(s1, s2):
+    return
 
 def get_optimal_paths(src, dst):
     get_paths(src, dst)
@@ -244,9 +247,9 @@ class ProjectController(app_manager.RyuApp):
                     )
                     dp.send_msg(req)
 
-                        # If the GROUP already existed, we send a GROUP_MOD to
-                        # eventually adjust the buckets with current link
-                        # utilization
+                # If the GROUP already existed, we send a GROUP_MOD to
+                # eventually adjust the buckets with current link
+                # utilization
                 else:
                     req = ofp_parser.OFPGroupMod(
                         dp, ofp.OFPGC_MODIFY, ofp.OFPGT_SELECT,
@@ -273,35 +276,60 @@ class ProjectController(app_manager.RyuApp):
                     priority=1, instructions=inst)
                 dp.send_msg(mod)
 
+    def _request_port_stats(self, switch):
+        '''
+        Request port statistic to a switch
+        '''
+        self.logger.debug(
+            'Request port stats for dp %s at t: %f',
+            switch.dp.id, time.time()
+        )
+        ofproto = switch.dp.ofproto
+        parser = switch.dp.ofproto_parser
+        req = parser.OFPPortStatsRequest(switch.dp, 0, ofproto.OFPP_ANY)
+        switch.dp.send_msg(req)
 
+    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
+    def _port_stats_reply_handler(self, ev):
+        '''
+        Handles a PORT STATS response from a switch
+        '''
 
-    def install_path(self, p, ev, src_mac, dst_mac):
-        # print "install_path is called"
-        # print "p=", p, " src_mac=", src_mac, " dst_mac=", dst_mac
-        msg = ev.msg
-        datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        for sw, in_port, out_port in p:
-            match = parser.OFPMatch(
-                in_port=in_port, eth_src=src_mac, eth_dst=dst_mac)
-            actions = [parser.OFPActionOutput(out_port)]
-            datapath = self.datapath_list[sw]
-            inst = [parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS, actions)]
-            mod = datapath.ofproto_parser.OFPFlowMod(
-                datapath=datapath, match=match, idle_timeout=0, hard_timeout=0,
-                priority=1, instructions=inst)
-            datapath.send_msg(mod)
+        ports = ev.msg.body
+        port_stats_reply_time = time.time()
+
+        # Calculate switch-controller RTT
+        switch = self.topo_shape.dpid_to_switch[ev.msg.datapath.id]
+        switch.calculate_delay_to_controller(port_stats_reply_time)
+
+        sorted_port_table = sorted(ports, key=lambda l: l.port_no)
+        for stat in sorted_port_table:
+            if stat.port_no not in switch.ports:
+                continue
+            port = switch.ports[stat.port_no]
+            utilization = stat.tx_bytes + stat.rx_bytes
+
+            if port.last_request_time:
+                timedelta = port_stats_reply_time - port.last_request_time
+                datadelta = utilization - port.last_utilization_value
+
+                utilization_bps = datadelta / timedelta
+                port.capacity = port.max_capacity - utilization_bps
+                self.logger.debug('p %d s %s utilization %f real_capacity %f',
+                                  stat.port_no, switch, datadelta, port.capacity)
+
+            port.last_request_time = port_stats_reply_time
+            port.last_utilization_value = utilization
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def switch_features_handler(self, ev):
+    def _switch_features_handler(self, ev):
         print "switch_features_handler is called"
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # Re
+        self.request_port_stats(datapath)
+
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(
             ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
@@ -313,6 +341,14 @@ class ProjectController(app_manager.RyuApp):
             priority=0, instructions=inst)
         datapath.send_msg(mod)
 
+    @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
+    def _port_status_handler(self, ev):
+        msg = ev.msg
+        dp = msg.datapath
+        ofp = dp.ofproto
+
+        print msg.data
+
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         msg = ev.msg
@@ -323,10 +359,8 @@ class ProjectController(app_manager.RyuApp):
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
-        
-        # print "eth.ethertype=", eth.ethertype
 
-        # avodi broadcast from LLDP
+        # avoid broadcast from LLDP
         if eth.ethertype == 35020:
             return
 
@@ -337,7 +371,6 @@ class ProjectController(app_manager.RyuApp):
 
         if src not in mymac.keys():
             mymac[src] = (dpid,  in_port)
-            # print "mymac=", mymac
 
         if dst in mymac.keys() and mymac[src][0] != mymac[dst][0]:
             self.install_paths(mymac[src][0], mymac[dst][0], mymac[dst][1], src, dst)
@@ -369,6 +402,8 @@ class ProjectController(app_manager.RyuApp):
 
         print sflow
         os.system(sflow)
+
+        hub.spawn_after(1, monitor_link)
 
         # print switch_info
         #start_new_thread(measure_link, ("thread_measure_link",))
