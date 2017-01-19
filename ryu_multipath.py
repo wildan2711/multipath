@@ -6,9 +6,9 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.mac import haddr_to_bin
 from ryu.lib.packet import packet
-from ryu.lib.packet import ethernet
+from ryu.lib.packet import ethernet, ipv4, arp
 from ryu.lib.packet import ether_types
-from ryu.lib import mac, hub
+from ryu.lib import mac, hub, ip
 from ryu.topology.api import get_switch, get_link
 from ryu.app.wsgi import ControllerBase
 from ryu.topology import event, switches
@@ -196,19 +196,24 @@ class ProjectController(app_manager.RyuApp):
     def ls(self, obj):
         print("\n".join([x for x in dir(obj) if x[0] != "_"]))
 
-    def install_paths(self, src, dst, last_port, mac_src, mac_dst):
+    def install_paths(self, pkt, src, dst, last_port):
         # print src," ", dst," ", last_port," ", mac_src," ", mac_dst
         paths = get_optimal_paths(src, dst)
         paths_with_ports = add_ports_to_paths(paths, last_port)
-        print paths_with_ports
+        # print paths_with_ports
         switches_in_paths = set().union(*paths)
+
+        arp_pkt = pkt.get_protocol(arp.arp)
+        ip_src = arp_pkt.src_ip
+        ip_dst = arp_pkt.dst_ip
 
         for node in switches_in_paths:
 
             dp = self.datapath_list[node]
             ofp = dp.ofproto
             ofp_parser = dp.ofproto_parser
-            match = ofp_parser.OFPMatch(eth_src=mac_src, eth_dst=mac_dst)
+            match_ip = ofp_parser.OFPMatch(eth_type=0x0800, ipv4_src=ip_src, ipv4_dst=ip_dst)
+            match_arp = ofp_parser.OFPMatch(eth_type=0x0806, arp_spa=ip_src, arp_tpa=ip_dst)
 
             out_ports = set()
             actions = []
@@ -227,7 +232,7 @@ class ProjectController(app_manager.RyuApp):
                 group_id = multipath_group_ids[node, src, dst]
 
                 buckets = []
-                print "node at ",node," out ports : ",out_ports
+                # print "node at ",node," out ports : ",out_ports
                 for port in out_ports:
                     bucket_weight = 10
                     bucket_action = [ofp_parser.OFPActionOutput(port)]
@@ -239,7 +244,7 @@ class ProjectController(app_manager.RyuApp):
                     )
                 # If GROUP Was new, we send a GROUP_ADD
                 if group_new:
-                    print 'GROUP_ADD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
+                    # print 'GROUP_ADD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
 
                     req = ofp_parser.OFPGroupMod(
                         dp, ofp.OFPGC_ADD, ofp.OFPGT_SELECT, group_id,
@@ -255,15 +260,19 @@ class ProjectController(app_manager.RyuApp):
                         dp, ofp.OFPGC_MODIFY, ofp.OFPGT_SELECT,
                         group_id, buckets)
                     dp.send_msg(req)
-                    print 'GROUP_MOD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
+                    # print 'GROUP_MOD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
                                 
                 actions = [ofp_parser.OFPActionGroup(group_id)]
 
                 inst = [ofp_parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-                mod = ofp_parser.OFPFlowMod(
-                    datapath=dp, match=match, idle_timeout=0, hard_timeout=0,
+                mod_ip = ofp_parser.OFPFlowMod(
+                    datapath=dp, match=match_ip, idle_timeout=0, hard_timeout=0,
+                    priority=32768, instructions=inst)
+                mod_arp = ofp_parser.OFPFlowMod(
+                    datapath=dp, match=match_arp, idle_timeout=0, hard_timeout=0,
                     priority=1, instructions=inst)
-                dp.send_msg(mod)
+                dp.send_msg(mod_ip)
+                dp.send_msg(mod_arp)
 
                     # Sending OUTPUT Rules
             elif len(out_ports) == 1:
@@ -271,10 +280,14 @@ class ProjectController(app_manager.RyuApp):
                 actions = [ofp_parser.OFPActionOutput(list(out_ports)[0])]
 
                 inst = [ofp_parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-                mod = ofp_parser.OFPFlowMod(
-                    datapath=dp, match=match, idle_timeout=0, hard_timeout=0,
+                mod_ip = ofp_parser.OFPFlowMod(
+                    datapath=dp, match=match_ip, idle_timeout=0, hard_timeout=0,
+                    priority=32768, instructions=inst)
+                mod_arp = ofp_parser.OFPFlowMod(
+                    datapath=dp, match=match_arp, idle_timeout=0, hard_timeout=0,
                     priority=1, instructions=inst)
-                dp.send_msg(mod)
+                dp.send_msg(mod_ip)
+                dp.send_msg(mod_arp)
 
     def _request_port_stats(self, switch):
         '''
@@ -294,7 +307,6 @@ class ProjectController(app_manager.RyuApp):
         '''
         Handles a PORT STATS response from a switch
         '''
-
         ports = ev.msg.body
         port_stats_reply_time = time.time()
 
@@ -328,7 +340,7 @@ class ProjectController(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        self.request_port_stats(datapath)
+        # self.request_port_stats(datapath)
 
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(
@@ -347,7 +359,7 @@ class ProjectController(app_manager.RyuApp):
         dp = msg.datapath
         ofp = dp.ofproto
 
-        print msg.data
+        print "Port status Handler ", msg.data
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -372,8 +384,9 @@ class ProjectController(app_manager.RyuApp):
         if src not in mymac.keys():
             mymac[src] = (dpid,  in_port)
 
-        if dst in mymac.keys() and mymac[src][0] != mymac[dst][0]:
-            self.install_paths(mymac[src][0], mymac[dst][0], mymac[dst][1], src, dst)
+        if dst in mymac.keys():
+            print pkt
+            self.install_paths(pkt, mymac[src][0], mymac[dst][0], mymac[dst][1])
         else:
             out_port = ofproto.OFPP_FLOOD
             actions = [parser.OFPActionOutput(out_port)]
@@ -403,7 +416,7 @@ class ProjectController(app_manager.RyuApp):
         print sflow
         os.system(sflow)
 
-        hub.spawn_after(1, monitor_link)
+        # hub.spawn_after(1, measure_link)
 
         # print switch_info
         #start_new_thread(measure_link, ("thread_measure_link",))
