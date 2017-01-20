@@ -55,9 +55,10 @@ collector = '127.0.0.1'
 
 MAX_EXTRA_SWITCH = 1
 
-MAX_PATHS = 3
+MAX_PATHS = 2
 
 # get interface name of ip address (collector)
+
 
 def getIfInfo(ip):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -124,55 +125,33 @@ def get_paths(src, dst):
                 else:
                     stack.append((next, path + [next]))
         topology_map[src][dst] = paths
-        print "Jalur yg tersedia dari ",src, " ",dst," : ", topology_map[src][dst]
+        print "Jalur yg tersedia dari ", src, " ", dst, " : ", topology_map[src][dst]
+
 
 def get_link_cost(s1, s2):
     return
 
+
 def get_optimal_paths(src, dst):
     get_paths(src, dst)
-    paths_count = len(topology_map[src][dst]) if len(topology_map[src][dst]) < 3 else 3
+    paths_count = len(topology_map[src][dst]) if len(
+        topology_map[src][dst]) < MAX_PATHS else MAX_PATHS
     return sorted(topology_map[src][dst], key=lambda x: len(x))[0:(paths_count)]
 
-def add_ports_to_paths(paths, last_port):
+
+def add_ports_to_paths(paths, first_port, last_port):
     # Add the ports that connects the switches for all paths
     paths_p = []
     for path in paths:
         p = {}
+        in_port = first_port
         for s1, s2 in zip(path[:-1], path[1:]):
-            p[s1] = adjacency[s1][s2]
-        p[path[-1]] = last_port
+            out_port = adjacency[s1][s2]
+            p[s1] = (in_port, out_port)
+            in_port = adjacency[s2][s1]
+        p[path[-1]] = (in_port, last_port)
         paths_p.append(p)
     return paths_p
-
-def get_least_cost_route(src, dst, first_port, last_port):
-    # print src, dst, first_port, last_port
-    if src is dst:
-        return [(dst, first_port, last_port)]
-    try:
-        if adjacency[src][dst]:
-            return [(src, first_port, adjacency[src][dst])] + [(dst, adjacency[dst][src], last_port)]
-    except KeyError:
-        pass
-    # generate all paths from src to dst
-    get_paths(src, dst)
-    r = topology_map[src][dst]
-    route_costs = [{'route': [], 'cost':0} for k in range(len(r))]
-    for i in range(len(r)):
-        route_costs[i]['route'] = r[i]
-        for s, fp, lp in r[i]:
-            # get the total cost of every interface for switch
-            for ifindex in thr[s]:
-                route_costs[i]['cost'] += thr[s][ifindex]
-    print route_costs
-    if not route_costs[0]['route']:
-        del route_costs[0]
-    min_route = min(route_costs, key=itemgetter('cost'))
-    if min_route['cost'] == 0:
-        min_route = min(route_costs, key=lambda x: len(x['route']))
-    first = (src, first_port, adjacency[src][min_route['route'][0][0]])
-    last = (dst, adjacency[dst][min_route['route'][-1][0]], last_port)
-    return [first] + min_route['route'] + [last]
 
 def generate_openflow_gid():
     '''
@@ -183,6 +162,7 @@ def generate_openflow_gid():
         n = random.randint(0, 2**32)
     return n
 
+
 class ProjectController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
@@ -191,103 +171,120 @@ class ProjectController(app_manager.RyuApp):
         self.mac_to_port = {}
         self.topology_api_app = self
         self.datapath_list = {}
+        self.arp_table = {}
+        self.sw = {}
 
     # Handy function that lists all attributes in the given object
     def ls(self, obj):
         print("\n".join([x for x in dir(obj) if x[0] != "_"]))
 
-    def install_paths(self, pkt, src, dst, last_port):
+    def install_paths(self, src, first_port, dst, last_port, ip_src, ip_dst, mac_src, mac_dst):
         # print src," ", dst," ", last_port," ", mac_src," ", mac_dst
         paths = get_optimal_paths(src, dst)
-        paths_with_ports = add_ports_to_paths(paths, last_port)
-        # print paths_with_ports
+        paths_with_ports = add_ports_to_paths(paths, first_port, last_port)
+        print paths_with_ports
         switches_in_paths = set().union(*paths)
-
-        arp_pkt = pkt.get_protocol(arp.arp)
-        ip_src = arp_pkt.src_ip
-        ip_dst = arp_pkt.dst_ip
 
         for node in switches_in_paths:
 
             dp = self.datapath_list[node]
             ofp = dp.ofproto
             ofp_parser = dp.ofproto_parser
-            match_ip = ofp_parser.OFPMatch(eth_type=0x0800, ipv4_src=ip_src, ipv4_dst=ip_dst)
-            match_arp = ofp_parser.OFPMatch(eth_type=0x0806, arp_spa=ip_src, arp_tpa=ip_dst)
 
-            out_ports = set()
+            ports = {}
             actions = []
 
             for path in paths_with_ports:
                 if node in path:
-                    out_ports.add(path[node])
+                    in_port = path[node][0]
+                    out_port = path[node][1]
+                    if in_port in ports:
+                        ports[in_port].append(out_port)
+                    else:
+                        ports[in_port] = [out_port]
 
-            if len(out_ports) > 1:
-                group_id = None
-                group_new = False
+            for in_port in ports:
 
-                if (node, src, dst) not in multipath_group_ids:
-                    group_new = True
-                    multipath_group_ids[node, src, dst] = generate_openflow_gid()
-                group_id = multipath_group_ids[node, src, dst]
+                match_ip = ofp_parser.OFPMatch(
+                    in_port=in_port, eth_type=0x0800, ipv4_src=ip_src, ipv4_dst=ip_dst)
+                match_arp = ofp_parser.OFPMatch(
+                    in_port=in_port, 
+                    eth_type=0x0806, 
+                    arp_sha=mac_src, 
+                    arp_tha=mac_dst
+                    )
 
-                buckets = []
-                # print "node at ",node," out ports : ",out_ports
-                for port in out_ports:
-                    bucket_weight = 10
-                    bucket_action = [ofp_parser.OFPActionOutput(port)]
-                    buckets.append(
-                        ofp_parser.OFPBucket(
-                            weight=bucket_weight,
-                            actions=bucket_action
+                out_ports = ports[in_port]
+
+                if len(out_ports) > 1:
+                    group_id = None
+                    group_new = False
+
+                    if (node, src, dst) not in multipath_group_ids:
+                        group_new = True
+                        multipath_group_ids[
+                            node, src, dst] = generate_openflow_gid()
+                    group_id = multipath_group_ids[node, src, dst]
+
+                    buckets = []
+                    # print "node at ",node," out ports : ",out_ports
+                    for port in out_ports:
+                        bucket_weight = 50
+                        bucket_action = [ofp_parser.OFPActionOutput(port)]
+                        buckets.append(
+                            ofp_parser.OFPBucket(
+                                weight=bucket_weight,
+                                actions=bucket_action
+                            )
                         )
-                    )
-                # If GROUP Was new, we send a GROUP_ADD
-                if group_new:
-                    # print 'GROUP_ADD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
+                    # If GROUP Was new, we send a GROUP_ADD
+                    if group_new:
+                        print 'GROUP_ADD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
 
-                    req = ofp_parser.OFPGroupMod(
-                        dp, ofp.OFPGC_ADD, ofp.OFPGT_SELECT, group_id,
-                        buckets
-                    )
-                    dp.send_msg(req)
+                        req = ofp_parser.OFPGroupMod(
+                            dp, ofp.OFPGC_ADD, ofp.OFPGT_SELECT, group_id,
+                            buckets
+                        )
+                        dp.send_msg(req)
 
-                # If the GROUP already existed, we send a GROUP_MOD to
-                # eventually adjust the buckets with current link
-                # utilization
-                else:
-                    req = ofp_parser.OFPGroupMod(
-                        dp, ofp.OFPGC_MODIFY, ofp.OFPGT_SELECT,
-                        group_id, buckets)
-                    dp.send_msg(req)
-                    # print 'GROUP_MOD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
-                                
-                actions = [ofp_parser.OFPActionGroup(group_id)]
+                    # If the GROUP already existed, we send a GROUP_MOD to
+                    # eventually adjust the buckets with current link
+                    # utilization
+                    else:
+                        req = ofp_parser.OFPGroupMod(
+                            dp, ofp.OFPGC_MODIFY, ofp.OFPGT_SELECT,
+                            group_id, buckets)
+                        dp.send_msg(req)
+                        print 'GROUP_MOD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
 
-                inst = [ofp_parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-                mod_ip = ofp_parser.OFPFlowMod(
-                    datapath=dp, match=match_ip, idle_timeout=0, hard_timeout=0,
-                    priority=32768, instructions=inst)
-                mod_arp = ofp_parser.OFPFlowMod(
-                    datapath=dp, match=match_arp, idle_timeout=0, hard_timeout=0,
-                    priority=1, instructions=inst)
-                dp.send_msg(mod_ip)
-                dp.send_msg(mod_arp)
+                    actions = [ofp_parser.OFPActionGroup(group_id)]
+
+                    inst = [ofp_parser.OFPInstructionActions(
+                        ofp.OFPIT_APPLY_ACTIONS, actions)]
+                    mod_ip = ofp_parser.OFPFlowMod(
+                        datapath=dp, match=match_ip, idle_timeout=0, hard_timeout=0,
+                        priority=32768, instructions=inst)
+                    mod_arp = ofp_parser.OFPFlowMod(
+                        datapath=dp, match=match_arp, idle_timeout=0, hard_timeout=0,
+                        priority=1, instructions=inst)
+                    dp.send_msg(mod_ip)
+                    dp.send_msg(mod_arp)
 
                     # Sending OUTPUT Rules
-            elif len(out_ports) == 1:
-                # print 'Match for %s from %s to %s out_ports %d' % (node, src, dst, out_ports[0])
-                actions = [ofp_parser.OFPActionOutput(list(out_ports)[0])]
+                elif len(out_ports) == 1:
+                    print 'Match for %s from %s to %s out_ports %d' % (node, src, dst, out_ports[0])
+                    actions = [ofp_parser.OFPActionOutput(out_ports[0])]
 
-                inst = [ofp_parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-                mod_ip = ofp_parser.OFPFlowMod(
-                    datapath=dp, match=match_ip, idle_timeout=0, hard_timeout=0,
-                    priority=32768, instructions=inst)
-                mod_arp = ofp_parser.OFPFlowMod(
-                    datapath=dp, match=match_arp, idle_timeout=0, hard_timeout=0,
-                    priority=1, instructions=inst)
-                dp.send_msg(mod_ip)
-                dp.send_msg(mod_arp)
+                    inst = [ofp_parser.OFPInstructionActions(
+                        ofp.OFPIT_APPLY_ACTIONS, actions)]
+                    mod_ip = ofp_parser.OFPFlowMod(
+                        datapath=dp, match=match_ip, idle_timeout=0, hard_timeout=0,
+                        priority=32768, instructions=inst)
+                    mod_arp = ofp_parser.OFPFlowMod(
+                        datapath=dp, match=match_arp, idle_timeout=0, hard_timeout=0,
+                        priority=1, instructions=inst)
+                    dp.send_msg(mod_ip)
+                    dp.send_msg(mod_arp)
 
     def _request_port_stats(self, switch):
         '''
@@ -333,6 +330,22 @@ class ProjectController(app_manager.RyuApp):
             port.last_request_time = port_stats_reply_time
             port.last_utilization_value = utilization
 
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None):
+        print "Adding flow ", match, actions
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                             actions)]
+        if buffer_id:
+            mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
+                                    priority=priority, match=match,
+                                    instructions=inst)
+        else:
+            mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
+                                    match=match, instructions=inst)
+        datapath.send_msg(mod)
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def _switch_features_handler(self, ev):
         print "switch_features_handler is called"
@@ -340,26 +353,12 @@ class ProjectController(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # self.request_port_stats(datapath)
+        global switches
 
         match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(
-            ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
-        inst = [parser.OFPInstructionActions(
-            ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        mod = datapath.ofproto_parser.OFPFlowMod(
-            datapath=datapath, match=match, cookie=0,
-            command=ofproto.OFPFC_ADD, idle_timeout=0, hard_timeout=0,
-            priority=0, instructions=inst)
-        datapath.send_msg(mod)
-
-    @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
-    def _port_status_handler(self, ev):
-        msg = ev.msg
-        dp = msg.datapath
-        ofp = dp.ofproto
-
-        print "Port status Handler ", msg.data
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                          ofproto.OFPCML_NO_BUFFER)]
+        self.add_flow(datapath, 0, match, actions)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -381,24 +380,45 @@ class ProjectController(app_manager.RyuApp):
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
 
+        self.mac_to_port[dpid][src] = in_port
+
         if src not in mymac.keys():
-            mymac[src] = (dpid,  in_port)
+            mymac[src] = (dpid, in_port)
+            # print "mymac=", mymac
 
         if dst in mymac.keys():
-            print pkt
-            self.install_paths(pkt, mymac[src][0], mymac[dst][0], mymac[dst][1])
+            if dst in self.mac_to_port[dpid]:
+                print pkt
+                out_port = self.mac_to_port[dpid][dst]
+                arp_pkt = pkt.get_protocol(arp.arp)
+                if arp_pkt:
+                    ip_src = arp_pkt.src_ip  # if arp_pkt else ip_pkt.src
+                    ip_dst = arp_pkt.dst_ip  # if arp_pkt else ip_pkt.dst
+                    if ip_src and ip_dst not in self.arp_table:
+                        self.arp_table[ip_src] = src
+                        self.arp_table[ip_dst] = dst
+                        self.install_paths(mymac[src][0], mymac[src][1], mymac[dst][
+                                           0], mymac[dst][1], ip_src, ip_dst, src, dst)
+                        self.install_paths(mymac[dst][0], mymac[dst][1], mymac[src][
+                                           0], mymac[src][1], ip_dst, ip_src, dst, src)
         else:
             out_port = ofproto.OFPP_FLOOD
-            actions = [parser.OFPActionOutput(out_port)]
 
-            data = None
-            if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-                data = msg.data
+        actions = [parser.OFPActionOutput(out_port)]
 
-            out = parser.OFPPacketOut(
-                datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port,
-                actions=actions, data=data)
-            datapath.send_msg(out)
+        # install a flow to avoid packet_in next time
+        if out_port != ofproto.OFPP_FLOOD:
+            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
+            # self.add_flow(datapath, 1, match, actions)
+
+        data = None
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+            data = msg.data
+
+        out = parser.OFPPacketOut(
+            datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port,
+            actions=actions, data=data)
+        datapath.send_msg(out)
 
     def init_sflow(self, ifname, collector, sampling, polling):
         cmd = shlex.split('ip link show')
@@ -413,7 +433,7 @@ class ProjectController(app_manager.RyuApp):
             switch_info[int(switch[1:])]['ifname'].append(ifname)
             sflow += ' -- set bridge %s sflow=@sflow' % switch
 
-        print sflow
+        # print sflow
         os.system(sflow)
 
         # hub.spawn_after(1, measure_link)
@@ -423,7 +443,9 @@ class ProjectController(app_manager.RyuApp):
 
     @set_ev_cls(event.EventSwitchEnter)
     def get_topology_data(self, ev):
-        global switches
+        global switches, mymac
+        if switches == 4:
+            return
         switch_list = get_switch(self.topology_api_app, None)
         for switch in switch_list:
             if switch.dp.id not in switches:
@@ -440,10 +462,71 @@ class ProjectController(app_manager.RyuApp):
         for s1, s2, port1, port2 in mylinks:
             adjacency[s1][s2] = port1
             adjacency[s2][s1] = port2
-        
+
         if switches:
             print adjacency
             (ifname, agent) = getIfInfo(collector)
             logging.getLogger("get").setLevel(logging.WARNING)
             self.init_sflow(ifname, collector, 10, 10)
 
+    def arp_handler(self, msg):
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        in_port = msg.match['in_port']
+
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocols(ethernet.ethernet)[0]
+        arp_pkt = pkt.get_protocol(arp.arp)
+
+        if eth:
+            eth_dst = eth.dst
+            eth_src = eth.src
+
+        # Break the loop for avoiding ARP broadcast storm
+        if eth_dst == mac.BROADCAST_STR and arp_pkt:
+            arp_dst_ip = arp_pkt.dst_ip
+
+            if (datapath.id, eth_src, arp_dst_ip) in self.sw:
+                if self.sw[(datapath.id, eth_src, arp_dst_ip)] != in_port:
+                    datapath.send_packet_out(in_port=in_port, actions=[])
+                    return True
+            else:
+                self.sw[(datapath.id, eth_src, arp_dst_ip)] = in_port
+
+        # Try to reply arp request
+        if arp_pkt:
+            hwtype = arp_pkt.hwtype
+            proto = arp_pkt.proto
+            hlen = arp_pkt.hlen
+            plen = arp_pkt.plen
+            opcode = arp_pkt.opcode
+            arp_src_ip = arp_pkt.src_ip
+            arp_dst_ip = arp_pkt.dst_ip
+
+            if opcode == arp.ARP_REQUEST:
+                if arp_dst_ip in self.arp_table:
+                    actions = [parser.OFPActionOutput(in_port)]
+                    ARP_Reply = packet.Packet()
+
+                    ARP_Reply.add_protocol(ethernet.ethernet(
+                        ethertype=eth.ethertype,
+                        dst=eth_src,
+                        src=self.arp_table[arp_dst_ip]))
+                    ARP_Reply.add_protocol(arp.arp(
+                        opcode=arp.ARP_REPLY,
+                        src_mac=self.arp_table[arp_dst_ip],
+                        src_ip=arp_dst_ip,
+                        dst_mac=eth_src,
+                        dst_ip=arp_src_ip))
+
+                    ARP_Reply.serialize()
+
+                    out = parser.OFPPacketOut(
+                        datapath=datapath,
+                        buffer_id=ofproto.OFP_NO_BUFFER,
+                        in_port=ofproto.OFPP_CONTROLLER,
+                        actions=actions, data=ARP_Reply.data)
+                    datapath.send_msg(out)
+                    return True
+        return False
