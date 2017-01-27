@@ -6,7 +6,7 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.mac import haddr_to_bin
 from ryu.lib.packet import packet
-from ryu.lib.packet import ethernet, ipv4, arp
+from ryu.lib.packet import ethernet, ipv4, arp, ipv6
 from ryu.lib.packet import ether_types
 from ryu.lib import mac, hub, ip
 from ryu.topology.api import get_switch, get_link
@@ -33,9 +33,7 @@ clock = defaultdict(lambda: 0)
 thr = defaultdict(lambda: defaultdict(lambda: 0))
 
 # switches
-switches = []
-
-switch_info = defaultdict(dict)
+switches = defaultdict(dict)
 
 # myhost[srcmac]->(switch, port)
 mymac = {}
@@ -51,16 +49,23 @@ multipath_group_ids = {}
 
 group_ids = []
 
-collector = '127.0.0.1'
+# Reference bandwidth = 1 Gbps
+REFERENCE_BW = 1000000000
+
+# Switch capacity = 100 Gbps
+SWITCH_CAPACITY = 100000000000
 
 MAX_EXTRA_SWITCH = 1
 
-MAX_PATHS = 2
+MAX_PATHS = 3
 
-# get interface name of ip address (collector)
-
+# Ip address of sFlow collector
+collector = '127.0.0.1'
 
 def getIfInfo(ip):
+    '''
+    Get interface name of ip address (collector)
+    '''
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect((ip, 0))
     ip = s.getsockname()[0]
@@ -70,22 +75,53 @@ def getIfInfo(ip):
         if entry[1] == ip:
             return entry
 
+def init_sflow(ifname, collector, sampling, polling):
+    '''
+    Initialise sFlow for monitoring traffic
+    '''
+    cmd = shlex.split('ip link show')
+    out = check_output(cmd)
+    info = re.findall('(\d+): ((s[0-9]+)-eth([0-9]+))', out)
 
-def measure_link(thread):
-    # every second, we measure the incoming bytes for each port of the switch
+    sflow = 'ovs-vsctl -- --id=@sflow create sflow agent=%s target=\\"%s\\" sampling=%s polling=%s --' % (
+        ifname, collector, sampling, polling)
+
+    for ifindex, ifname, switch, port in info:
+        if int(switch[1:]) in switches:
+            switches[int(switch[1:])]['ports'][int(port)] = {
+                'ifindex' : ifindex,
+                'ifname' : ifname,
+                'bandwidth' : 0
+            }
+            sflow += ' -- set bridge %s sflow=@sflow' % switch
+
+    print sflow
+    os.system(sflow)
+
+    hub.spawn_after(0.1, measure_link)
+
+def measure_link():
+    '''
+    Measure outgoing traffic per second for all switch ports
+    '''
     while True:
-        for switch in switches:
-            for ifindex in switch_info[switch]['ifindex']:
-                url = 'http://' + collector + ':8008/metric/' + \
-                    collector + '/' + ifindex + '.ifoutoctets/json'
-                r = get(url)
-                response = r.json()
-                # print response
-                try:
-                    thr[switch][ifindex] = response[0]['metricValue']
-                except KeyError:
-                    pass
-                # print switch,thr[switch]
+        try:
+            for switch in switches:
+                for port in switches[switch]['ports']:
+                    url = 'http://' + collector + ':8008/metric/' + \
+                        collector + '/' + switches[switch]['ports'][port]['ifindex'] + \
+                        '.ifoutoctets/json'
+                    r = get(url)
+                    response = r.json()
+                    # print response
+                    try:
+                        # Bps to bps
+                        thr[switch][port] = response[0]['metricValue'] * 8
+                    except KeyError:
+                        pass
+                    # print switch,thr[switch]
+        except RuntimeError:
+            pass
         hub.sleep(1)
 
 
@@ -108,39 +144,55 @@ def measure_path(thread):
                     pass
         time.sleep(0.1)
 
-
 def get_paths(src, dst):
-    # Depth-first search, find all paths from src to dst
-    try:
-        if topology_map[src][dst]:
-            return
-    except KeyError:
-        paths = []
-        stack = [(src, [src])]
-        while stack:
-            (node, path) = stack.pop()
-            for next in set(adjacency[node].keys()) - set(path):
-                if next is dst:
-                    paths.append(path + [next])
-                else:
-                    stack.append((next, path + [next]))
-        topology_map[src][dst] = paths
-        print "Jalur yg tersedia dari ", src, " ", dst, " : ", topology_map[src][dst]
-
+    '''
+    Get all paths from src to dst using DFS algorithm    
+    '''
+    paths = []
+    stack = [(src, [src])]
+    while stack:
+        (node, path) = stack.pop()
+        for next in set(adjacency[node].keys()) - set(path):
+            if next is dst:
+                paths.append(path + [next])
+            else:
+                stack.append((next, path + [next]))
+    print "Available paths from ", src, " to ", dst, " : ", paths
+    return paths
 
 def get_link_cost(s1, s2):
-    return
+    '''
+    Get the link cost between two switches 
+    '''
+    traffic = 0
+    e1 = adjacency[s1][s2]
+    e2 = adjacency[s2][s1]
+    bl = min(switches[s1]['ports'][e1]['bandwidth'], switches[s2]['ports'][e2]['bandwidth'])
+    ew = REFERENCE_BW/(bl - thr[s2][e1])
+    return ew
 
+def get_path_cost(path):
+    '''
+    Get the path cost
+    '''
+    cost = 0
+    for i in range(len(path)-1):
+        cost += get_link_cost(path[i], path[i+1])
+    return cost
 
 def get_optimal_paths(src, dst):
-    get_paths(src, dst)
-    paths_count = len(topology_map[src][dst]) if len(
-        topology_map[src][dst]) < MAX_PATHS else MAX_PATHS
-    return sorted(topology_map[src][dst], key=lambda x: len(x))[0:(paths_count)]
-
+    '''
+    Get the n-most optimal paths according to MAX_PATHS
+    '''
+    paths = get_paths(src, dst)
+    paths_count = len(paths) if len(
+        paths) < MAX_PATHS else MAX_PATHS
+    return sorted(paths, key=lambda x: get_path_cost(x))[0:(paths_count)]
 
 def add_ports_to_paths(paths, first_port, last_port):
-    # Add the ports that connects the switches for all paths
+    '''
+    Add the ports that connects the switches for all paths
+    '''
     paths_p = []
     for path in paths:
         p = {}
@@ -174,15 +226,15 @@ class ProjectController(app_manager.RyuApp):
         self.arp_table = {}
         self.sw = {}
 
-    # Handy function that lists all attributes in the given object
-    def ls(self, obj):
-        print("\n".join([x for x in dir(obj) if x[0] != "_"]))
-
     def install_paths(self, src, first_port, dst, last_port, ip_src, ip_dst, mac_src, mac_dst):
-        # print src," ", dst," ", last_port," ", mac_src," ", mac_dst
+        computation_start = time.time()
         paths = get_optimal_paths(src, dst)
+        pw = []
+        for path in paths:
+            pw.append(get_path_cost(path))
+            print path, "cost = ", pw[len(pw) - 1]
+        sum_of_pw = sum(pw)
         paths_with_ports = add_ports_to_paths(paths, first_port, last_port)
-        print paths_with_ports
         switches_in_paths = set().union(*paths)
 
         for node in switches_in_paths:
@@ -193,26 +245,32 @@ class ProjectController(app_manager.RyuApp):
 
             ports = {}
             actions = []
+            i = 0
 
             for path in paths_with_ports:
                 if node in path:
                     in_port = path[node][0]
                     out_port = path[node][1]
                     if in_port in ports:
-                        ports[in_port].append(out_port)
+                        ports[in_port].append((out_port, pw[i]))
                     else:
-                        ports[in_port] = [out_port]
+                        ports[in_port] = [(out_port, pw[i])]
+                i += 1
 
             for in_port in ports:
 
                 match_ip = ofp_parser.OFPMatch(
-                    in_port=in_port, eth_type=0x0800, ipv4_src=ip_src, ipv4_dst=ip_dst)
+                    in_port=in_port, 
+                    eth_type=0x0800, 
+                    ipv4_src=ip_src, 
+                    ipv4_dst=ip_dst
+                )
                 match_arp = ofp_parser.OFPMatch(
                     in_port=in_port, 
                     eth_type=0x0806, 
-                    arp_sha=mac_src, 
-                    arp_tha=mac_dst
-                    )
+                    arp_spa=ip_src, 
+                    arp_tpa=ip_dst
+                )
 
                 out_ports = ports[in_port]
 
@@ -228,8 +286,8 @@ class ProjectController(app_manager.RyuApp):
 
                     buckets = []
                     # print "node at ",node," out ports : ",out_ports
-                    for port in out_ports:
-                        bucket_weight = 50
+                    for port, weight in out_ports:
+                        bucket_weight = int(round((1 - weight/sum_of_pw) * 10))
                         bucket_action = [ofp_parser.OFPActionOutput(port)]
                         buckets.append(
                             ofp_parser.OFPBucket(
@@ -239,7 +297,7 @@ class ProjectController(app_manager.RyuApp):
                         )
                     # If GROUP Was new, we send a GROUP_ADD
                     if group_new:
-                        print 'GROUP_ADD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
+                        # print 'GROUP_ADD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
 
                         req = ofp_parser.OFPGroupMod(
                             dp, ofp.OFPGC_ADD, ofp.OFPGT_SELECT, group_id,
@@ -255,83 +313,24 @@ class ProjectController(app_manager.RyuApp):
                             dp, ofp.OFPGC_MODIFY, ofp.OFPGT_SELECT,
                             group_id, buckets)
                         dp.send_msg(req)
-                        print 'GROUP_MOD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
+                        # print 'GROUP_MOD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
 
                     actions = [ofp_parser.OFPActionGroup(group_id)]
 
-                    inst = [ofp_parser.OFPInstructionActions(
-                        ofp.OFPIT_APPLY_ACTIONS, actions)]
-                    mod_ip = ofp_parser.OFPFlowMod(
-                        datapath=dp, match=match_ip, idle_timeout=0, hard_timeout=0,
-                        priority=32768, instructions=inst)
-                    mod_arp = ofp_parser.OFPFlowMod(
-                        datapath=dp, match=match_arp, idle_timeout=0, hard_timeout=0,
-                        priority=1, instructions=inst)
-                    dp.send_msg(mod_ip)
-                    dp.send_msg(mod_arp)
+                    self.add_flow(dp, 32768, match_ip, actions)
+                    self.add_flow(dp, 1, match_arp, actions)
 
-                    # Sending OUTPUT Rules
+                # Sending OUTPUT Rules
                 elif len(out_ports) == 1:
-                    print 'Match for %s from %s to %s out_ports %d' % (node, src, dst, out_ports[0])
-                    actions = [ofp_parser.OFPActionOutput(out_ports[0])]
+                    # print 'Match for %s from %s to %s out_ports %d' % (node, src, dst, out_ports[0])
+                    actions = [ofp_parser.OFPActionOutput(out_ports[0][0])]
 
-                    inst = [ofp_parser.OFPInstructionActions(
-                        ofp.OFPIT_APPLY_ACTIONS, actions)]
-                    mod_ip = ofp_parser.OFPFlowMod(
-                        datapath=dp, match=match_ip, idle_timeout=0, hard_timeout=0,
-                        priority=32768, instructions=inst)
-                    mod_arp = ofp_parser.OFPFlowMod(
-                        datapath=dp, match=match_arp, idle_timeout=0, hard_timeout=0,
-                        priority=1, instructions=inst)
-                    dp.send_msg(mod_ip)
-                    dp.send_msg(mod_arp)
-
-    def _request_port_stats(self, switch):
-        '''
-        Request port statistic to a switch
-        '''
-        self.logger.debug(
-            'Request port stats for dp %s at t: %f',
-            switch.dp.id, time.time()
-        )
-        ofproto = switch.dp.ofproto
-        parser = switch.dp.ofproto_parser
-        req = parser.OFPPortStatsRequest(switch.dp, 0, ofproto.OFPP_ANY)
-        switch.dp.send_msg(req)
-
-    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
-    def _port_stats_reply_handler(self, ev):
-        '''
-        Handles a PORT STATS response from a switch
-        '''
-        ports = ev.msg.body
-        port_stats_reply_time = time.time()
-
-        # Calculate switch-controller RTT
-        switch = self.topo_shape.dpid_to_switch[ev.msg.datapath.id]
-        switch.calculate_delay_to_controller(port_stats_reply_time)
-
-        sorted_port_table = sorted(ports, key=lambda l: l.port_no)
-        for stat in sorted_port_table:
-            if stat.port_no not in switch.ports:
-                continue
-            port = switch.ports[stat.port_no]
-            utilization = stat.tx_bytes + stat.rx_bytes
-
-            if port.last_request_time:
-                timedelta = port_stats_reply_time - port.last_request_time
-                datadelta = utilization - port.last_utilization_value
-
-                utilization_bps = datadelta / timedelta
-                port.capacity = port.max_capacity - utilization_bps
-                self.logger.debug('p %d s %s utilization %f real_capacity %f',
-                                  stat.port_no, switch, datadelta, port.capacity)
-
-            port.last_request_time = port_stats_reply_time
-            port.last_utilization_value = utilization
+                    self.add_flow(dp, 32768, match_ip, actions)
+                    self.add_flow(dp, 1, match_arp, actions)
+        print "Path installation finished in ", time.time() - computation_start 
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
-        print "Adding flow ", match, actions
+        # print "Adding flow ", match, actions
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
@@ -353,12 +352,23 @@ class ProjectController(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        global switches
-
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
+
+    @set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
+    def port_desc_stats_reply_handler(self, ev):
+        switch = ev.msg.datapath
+        try:
+            for p in ev.msg.body:
+                if p.port_no in switches[switch.id]['ports']:
+                    switches[switch.id]['ports'][p.port_no]["bandwidth"] = p.curr_speed
+        # Resend request if reply arrives while initializing
+        except RuntimeError: 
+            req = ofp_parser.OFPPortDescStatsRequest(switch)
+            switch.send_msg(req)
+        print switches
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -375,6 +385,12 @@ class ProjectController(app_manager.RyuApp):
         if eth.ethertype == 35020:
             return
 
+        if pkt.get_protocol(ipv6.ipv6):  # Drop the IPV6 Packets.
+            match = parser.OFPMatch(eth_type=eth.ethertype)
+            actions = []
+            self.add_flow(datapath, 1, match, actions)
+            return None
+
         dst = eth.dst
         src = eth.src
         dpid = datapath.id
@@ -384,32 +400,32 @@ class ProjectController(app_manager.RyuApp):
 
         if src not in mymac.keys():
             mymac[src] = (dpid, in_port)
-            # print "mymac=", mymac
+
+        out_port = ofproto.OFPP_FLOOD
 
         if dst in mymac.keys():
             if dst in self.mac_to_port[dpid]:
-                print pkt
                 out_port = self.mac_to_port[dpid][dst]
                 arp_pkt = pkt.get_protocol(arp.arp)
                 if arp_pkt:
-                    ip_src = arp_pkt.src_ip  # if arp_pkt else ip_pkt.src
-                    ip_dst = arp_pkt.dst_ip  # if arp_pkt else ip_pkt.dst
-                    if ip_src and ip_dst not in self.arp_table:
-                        self.arp_table[ip_src] = src
-                        self.arp_table[ip_dst] = dst
-                        self.install_paths(mymac[src][0], mymac[src][1], mymac[dst][
-                                           0], mymac[dst][1], ip_src, ip_dst, src, dst)
-                        self.install_paths(mymac[dst][0], mymac[dst][1], mymac[src][
-                                           0], mymac[src][1], ip_dst, ip_src, dst, src)
-        else:
-            out_port = ofproto.OFPP_FLOOD
+                    ip_src = arp_pkt.src_ip  
+                    ip_dst = arp_pkt.dst_ip  
+                    self.install_paths(mymac[src][0], mymac[src][1], mymac[dst][
+                                        0], mymac[dst][1], ip_src, ip_dst, src, dst)
+                    self.install_paths(mymac[dst][0], mymac[dst][1], mymac[src][
+                                        0], mymac[src][1], ip_dst, ip_src, dst, src)
+                    self.arp_table[ip_src] = src
+                    self.arp_handler(msg)
+
+
+        # print pkt
 
         actions = [parser.OFPActionOutput(out_port)]
 
         # install a flow to avoid packet_in next time
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            # self.add_flow(datapath, 1, match, actions)
+            self.add_flow(datapath, 1, match, actions)
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
@@ -420,54 +436,45 @@ class ProjectController(app_manager.RyuApp):
             actions=actions, data=data)
         datapath.send_msg(out)
 
-    def init_sflow(self, ifname, collector, sampling, polling):
-        cmd = shlex.split('ip link show')
-        out = check_output(cmd)
-        info = re.findall('(\d+): ((s[0-9]+)-eth[0-9]+)', out)
-
-        sflow = 'ovs-vsctl -- --id=@sflow create sflow agent=%s target=\\"%s\\" sampling=%s polling=%s --' % (
-            ifname, collector, sampling, polling)
-
-        for ifindex, ifname, switch in info:
-            switch_info[int(switch[1:])]['ifindex'].append(ifindex)
-            switch_info[int(switch[1:])]['ifname'].append(ifname)
-            sflow += ' -- set bridge %s sflow=@sflow' % switch
-
-        # print sflow
-        os.system(sflow)
-
-        # hub.spawn_after(1, measure_link)
-
-        # print switch_info
-        #start_new_thread(measure_link, ("thread_measure_link",))
-
     @set_ev_cls(event.EventSwitchEnter)
-    def get_topology_data(self, ev):
-        global switches, mymac
-        if switches == 4:
-            return
-        switch_list = get_switch(self.topology_api_app, None)
-        for switch in switch_list:
-            if switch.dp.id not in switches:
-                switches.append(switch.dp.id)
-                switch_info[switch.dp.id]['ifindex'] = []
-                switch_info[switch.dp.id]['ifname'] = []
-                self.datapath_list[switch.dp.id] = switch.dp
-        # print "self.datapath_list=", self.datapath_list
-        print "switches=", switches
-
-        links_list = get_link(self.topology_api_app, None)
-        mylinks = [(link.src.dpid, link.dst.dpid, link.src.port_no,
-                    link.dst.port_no) for link in links_list]
-        for s1, s2, port1, port2 in mylinks:
-            adjacency[s1][s2] = port1
-            adjacency[s2][s1] = port2
+    def switch_enter_handler(self, event):
+        switch = event.switch.dp
+        ofp_parser = switch.ofproto_parser
+        if switch.id not in switches:
+            switches[switch.id]['ports'] = defaultdict(dict)
+            switches[switch.id]['capacity'] = SWITCH_CAPACITY # 100 Gbps
+            self.datapath_list[switch.id] = switch
+            req = ofp_parser.OFPPortDescStatsRequest(switch)
+            switch.send_msg(req)
 
         if switches:
-            print adjacency
             (ifname, agent) = getIfInfo(collector)
-            logging.getLogger("get").setLevel(logging.WARNING)
-            self.init_sflow(ifname, collector, 10, 10)
+            logging.getLogger("requests").setLevel(logging.WARNING)
+            logging.getLogger("urllib3").setLevel(logging.WARNING)
+            init_sflow(ifname, collector, 10, 10)
+
+    @set_ev_cls(event.EventSwitchLeave, MAIN_DISPATCHER)
+    def switch_leave_handler(self, event):
+        print event
+        switch = event.dpid
+        if switch in switches:
+            del switches[switch]
+            del self.datapath_list[switch]
+
+    @set_ev_cls(event.EventLinkAdd, MAIN_DISPATCHER)
+    def link_add_handler(self, event):
+        s1 = event.link.src
+        s2 = event.link.dst
+        adjacency[s1.dpid][s2.dpid] = s1.port_no
+        adjacency[s2.dpid][s1.dpid] = s2.port_no
+
+    @set_ev_cls(event.EventLinkDelete, MAIN_DISPATCHER)
+    def link_delete_handler(self, event):
+        s1 = event.link.src
+        s2 = event.link.dst
+        if adjacency[s1.dpid][s2.dpid]:
+            del adjacency[s1.dpid][s2.dpid]
+            del adjacency[s2.dpid][s1.dpid]
 
     def arp_handler(self, msg):
         datapath = msg.datapath
@@ -484,27 +491,31 @@ class ProjectController(app_manager.RyuApp):
             eth_src = eth.src
 
         # Break the loop for avoiding ARP broadcast storm
-        if eth_dst == mac.BROADCAST_STR and arp_pkt:
+        if eth_dst == mac.BROADCAST_STR:  # and arp_pkt:
             arp_dst_ip = arp_pkt.dst_ip
+            arp_src_ip = arp_pkt.src_ip
 
-            if (datapath.id, eth_src, arp_dst_ip) in self.sw:
-                if self.sw[(datapath.id, eth_src, arp_dst_ip)] != in_port:
+            if (datapath.id, arp_src_ip, arp_dst_ip) in self.sw:
+                # packet come back at different port.
+                if self.sw[(datapath.id, arp_src_ip, arp_dst_ip)] != in_port:
                     datapath.send_packet_out(in_port=in_port, actions=[])
                     return True
             else:
-                self.sw[(datapath.id, eth_src, arp_dst_ip)] = in_port
+                # self.sw.setdefault((datapath.id, eth_src, arp_dst_ip), None)
+                self.sw[(datapath.id, arp_src_ip, arp_dst_ip)] = in_port
+                print self.sw
+                self.mac_to_port.setdefault(datapath.id, {})
+                self.mac_to_port[datapath.id][eth_src] = in_port
 
         # Try to reply arp request
         if arp_pkt:
-            hwtype = arp_pkt.hwtype
-            proto = arp_pkt.proto
-            hlen = arp_pkt.hlen
-            plen = arp_pkt.plen
-            opcode = arp_pkt.opcode
-            arp_src_ip = arp_pkt.src_ip
-            arp_dst_ip = arp_pkt.dst_ip
-
-            if opcode == arp.ARP_REQUEST:
+            if arp_pkt.opcode == arp.ARP_REQUEST:
+                hwtype = arp_pkt.hwtype
+                proto = arp_pkt.proto
+                hlen = arp_pkt.hlen
+                plen = arp_pkt.plen
+                arp_src_ip = arp_pkt.src_ip
+                arp_dst_ip = arp_pkt.dst_ip
                 if arp_dst_ip in self.arp_table:
                     actions = [parser.OFPActionOutput(in_port)]
                     ARP_Reply = packet.Packet()
@@ -528,5 +539,6 @@ class ProjectController(app_manager.RyuApp):
                         in_port=ofproto.OFPP_CONTROLLER,
                         actions=actions, data=ARP_Reply.data)
                     datapath.send_msg(out)
+                    print "ARP_Reply"
                     return True
         return False
