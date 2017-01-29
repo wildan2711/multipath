@@ -1,3 +1,3 @@
-# multipath pyretic 
+# Multipath SDN Controller
 
-On the way
+Implementation of a Multipath SDN Controller in Ryu and Pyretic, adaptable to the topology used.
