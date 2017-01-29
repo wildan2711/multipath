@@ -28,8 +28,6 @@ import random
 
 from datetime import datetime
 
-byte = defaultdict(lambda: 0)
-clock = defaultdict(lambda: 0)
 thr = defaultdict(lambda: defaultdict(lambda: 0))
 
 # switches
@@ -39,8 +37,6 @@ switches = defaultdict(dict)
 mymac = {}
 
 topology_map = defaultdict(dict)
-
-min_route = defaultdict(dict)
 
 # adjacency map [sw1][sw2]->port from sw1 to sw2
 adjacency = defaultdict(dict)
@@ -55,6 +51,7 @@ REFERENCE_BW = 1000000000
 # Switch capacity = 100 Gbps
 SWITCH_CAPACITY = 100000000000
 
+# TODO: (For non-shortest path) limit number of extra switches from shortest path
 MAX_EXTRA_SWITCH = 1
 
 MAX_PATHS = 3
@@ -124,26 +121,6 @@ def measure_link():
             pass
         hub.sleep(1)
 
-
-def path_cost(route):
-    cost = 0
-    for s, p in route:
-        for i in thr[s]:
-            cost += thr[s][i]
-    return cost
-
-
-def measure_path(thread):
-    while True:
-        for src in topology_map.keys():
-            for dst in topology_map[src].keys():
-                try:
-                    min_route[src][dst] = min(
-                        topology_map[src][dst], key=path_cost)
-                except KeyError:
-                    pass
-        time.sleep(0.1)
-
 def get_paths(src, dst):
     '''
     Get all paths from src to dst using DFS algorithm    
@@ -164,7 +141,6 @@ def get_link_cost(s1, s2):
     '''
     Get the link cost between two switches 
     '''
-    traffic = 0
     e1 = adjacency[s1][s2]
     e2 = adjacency[s2][s1]
     bl = min(switches[s1]['ports'][e1]['bandwidth'], switches[s2]['ports'][e2]['bandwidth'])
