@@ -288,7 +288,7 @@ class ProjectController(app_manager.RyuApp):
                     buckets = []
                     # print "node at ",node," out ports : ",out_ports
                     for port, weight in out_ports:
-                        bucket_weight = int(round((1 - weight/sum_of_pw) * 10))
+                        bucket_weight = 0
                         bucket_action = [ofp_parser.OFPActionOutput(port)]
                         buckets.append(
                             ofp_parser.OFPBucket(
@@ -303,7 +303,7 @@ class ProjectController(app_manager.RyuApp):
                         # print 'GROUP_ADD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
 
                         req = ofp_parser.OFPGroupMod(
-                            dp, ofp.OFPGC_ADD, ofp.OFPGT_SELECT, group_id,
+                            dp, ofp.OFPGC_ADD, ofp.OFPGT_FF, group_id,
                             buckets
                         )
                         dp.send_msg(req)
@@ -313,7 +313,7 @@ class ProjectController(app_manager.RyuApp):
                     # utilization
                     else:
                         req = ofp_parser.OFPGroupMod(
-                            dp, ofp.OFPGC_MODIFY, ofp.OFPGT_SELECT,
+                            dp, ofp.OFPGC_MODIFY, ofp.OFPGT_FF,
                             group_id, buckets)
                         dp.send_msg(req)
                         # print 'GROUP_MOD for %s from %s to %s GROUP_ID %d out_rules %s' % (node, src, dst, group_id, buckets)
