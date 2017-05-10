@@ -57,7 +57,7 @@ SWITCH_CAPACITY = 100000000000
 
 MAX_EXTRA_SWITCH = 1
 
-MAX_PATHS = 3
+MAX_PATHS = float('Inf')
 
 # Ip address of sFlow collector
 collector = '127.0.0.1'
