@@ -98,7 +98,7 @@ def init_sflow(ifname, collector, sampling, polling):
     print sflow
     os.system(sflow)
 
-    hub.spawn_after(0.1, measure_link)
+    # hub.spawn_after(0.1, measure_link)
 
 def measure_link():
     '''
