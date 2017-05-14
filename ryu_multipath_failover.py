@@ -57,7 +57,7 @@ SWITCH_CAPACITY = 100000000000
 
 MAX_EXTRA_SWITCH = 1
 
-MAX_PATHS = 3
+MAX_PATHS = float('Inf')
 
 # Ip address of sFlow collector
 collector = '127.0.0.1'
@@ -98,7 +98,7 @@ def init_sflow(ifname, collector, sampling, polling):
     print sflow
     os.system(sflow)
 
-    hub.spawn_after(0.1, measure_link)
+    # hub.spawn_after(0.1, measure_link)
 
 def measure_link():
     '''
@@ -286,7 +286,7 @@ class ProjectController(app_manager.RyuApp):
                     group_id = multipath_group_ids[node, src, dst]
 
                     buckets = []
-                    # print "node at ",node," out ports : ",out_ports
+                    print "node at ",node," out ports : ",out_ports
                     for port, weight in out_ports:
                         bucket_weight = 0
                         bucket_action = [ofp_parser.OFPActionOutput(port)]
@@ -418,7 +418,6 @@ class ProjectController(app_manager.RyuApp):
                     self.install_paths(mymac[dst][0], mymac[dst][1], mymac[src][
                                         0], mymac[src][1], ip_dst, ip_src, dst, src)
                     self.arp_table[ip_src] = src
-                    self.arp_handler(msg)
 
         # if dst is mac.BROADCAST_STR:
         #     self.arp_handler(msg)
@@ -477,70 +476,3 @@ class ProjectController(app_manager.RyuApp):
     @set_ev_cls(event.EventLinkDelete, MAIN_DISPATCHER)
     def link_delete_handler(self, event):
         return
-
-    def arp_handler(self, msg):
-        datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        in_port = msg.match['in_port']
-
-        pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocols(ethernet.ethernet)[0]
-        arp_pkt = pkt.get_protocol(arp.arp)
-
-        if eth:
-            eth_dst = eth.dst
-            eth_src = eth.src
-
-        # Break the loop for avoiding ARP broadcast storm
-        if eth_dst == mac.BROADCAST_STR:  # and arp_pkt:
-            arp_dst_ip = arp_pkt.dst_ip
-            arp_src_ip = arp_pkt.src_ip
-
-            if (datapath.id, arp_src_ip, arp_dst_ip) in self.sw:
-                # packet come back at different port.
-                if self.sw[(datapath.id, arp_src_ip, arp_dst_ip)] != in_port:
-                    datapath.send_packet_out(in_port=in_port, actions=[])
-                    return True
-            else:
-                # self.sw.setdefault((datapath.id, eth_src, arp_dst_ip), None)
-                self.sw[(datapath.id, arp_src_ip, arp_dst_ip)] = in_port
-                print self.sw
-                self.mac_to_port.setdefault(datapath.id, {})
-                self.mac_to_port[datapath.id][eth_src] = in_port
-
-        # Try to reply arp request
-        if arp_pkt:
-            if arp_pkt.opcode == arp.ARP_REQUEST:
-                hwtype = arp_pkt.hwtype
-                proto = arp_pkt.proto
-                hlen = arp_pkt.hlen
-                plen = arp_pkt.plen
-                arp_src_ip = arp_pkt.src_ip
-                arp_dst_ip = arp_pkt.dst_ip
-                if arp_dst_ip in self.arp_table:
-                    actions = [parser.OFPActionOutput(in_port)]
-                    ARP_Reply = packet.Packet()
-
-                    ARP_Reply.add_protocol(ethernet.ethernet(
-                        ethertype=eth.ethertype,
-                        dst=eth_src,
-                        src=self.arp_table[arp_dst_ip]))
-                    ARP_Reply.add_protocol(arp.arp(
-                        opcode=arp.ARP_REPLY,
-                        src_mac=self.arp_table[arp_dst_ip],
-                        src_ip=arp_dst_ip,
-                        dst_mac=eth_src,
-                        dst_ip=arp_src_ip))
-
-                    ARP_Reply.serialize()
-
-                    out = parser.OFPPacketOut(
-                        datapath=datapath,
-                        buffer_id=ofproto.OFP_NO_BUFFER,
-                        in_port=ofproto.OFPP_CONTROLLER,
-                        actions=actions, data=ARP_Reply.data)
-                    datapath.send_msg(out)
-                    print "ARP_Reply"
-                    return True
-        return False
