@@ -253,27 +253,25 @@ class ProjectController(app_manager.RyuApp):
                     in_port = path[node][0]
                     out_port = path[node][1]
                     if in_port in ports:
-                        ports[in_port].append((out_port, pw[i]))
+                        ports[in_port].append(out_port)
                     else:
-                        ports[in_port] = [(out_port, pw[i])]
+                        ports[in_port] = [out_port]
                 i += 1
 
             for in_port in ports:
 
                 match_ip = ofp_parser.OFPMatch(
-                    in_port=in_port, 
                     eth_type=0x0800, 
                     ipv4_src=ip_src, 
                     ipv4_dst=ip_dst
                 )
                 match_arp = ofp_parser.OFPMatch(
-                    in_port=in_port, 
                     eth_type=0x0806, 
                     arp_spa=ip_src, 
                     arp_tpa=ip_dst
                 )
 
-                out_ports = ports[in_port]
+                out_ports = list(set(ports[in_port]))
 
                 if len(out_ports) > 1:
                     group_id = None
@@ -287,7 +285,7 @@ class ProjectController(app_manager.RyuApp):
 
                     buckets = []
                     print "node at ",node," out ports : ",out_ports
-                    for port, weight in out_ports:
+                    for port in out_ports:
                         bucket_weight = 0
                         bucket_action = [ofp_parser.OFPActionOutput(port)]
                         buckets.append(
@@ -326,7 +324,7 @@ class ProjectController(app_manager.RyuApp):
                 # Sending OUTPUT Rules
                 elif len(out_ports) == 1:
                     # print 'Match for %s from %s to %s out_ports %d' % (node, src, dst, out_ports[0])
-                    actions = [ofp_parser.OFPActionOutput(out_ports[0][0])]
+                    actions = [ofp_parser.OFPActionOutput(out_ports[0])]
 
                     self.add_flow(dp, 32768, match_ip, actions)
                     self.add_flow(dp, 1, match_arp, actions)
