@@ -165,7 +165,7 @@ def get_link_cost(s1, s2):
     e1 = adjacency[s1][s2]
     e2 = adjacency[s2][s1]
     bl = min(switches[s1]['ports'][e1]['bandwidth'], switches[s2]['ports'][e2]['bandwidth'])
-    print bl, thr[s2][e1]
+    # print bl, thr[s2][e1]
     ew = REFERENCE_BW/(bl - thr[s2][e1])
     return ew
 
@@ -244,7 +244,7 @@ class ProjectController(app_manager.RyuApp):
             ofp = dp.ofproto
             ofp_parser = dp.ofproto_parser
 
-            ports = {}
+            ports = defaultdict(list)
             actions = []
             i = 0
 
@@ -252,10 +252,7 @@ class ProjectController(app_manager.RyuApp):
                 if node in path:
                     in_port = path[node][0]
                     out_port = path[node][1]
-                    if in_port in ports:
-                        ports[in_port].append(out_port)
-                    else:
-                        ports[in_port] = [out_port]
+                    ports[in_port].append(out_port)
                 i += 1
 
             for in_port in ports:
