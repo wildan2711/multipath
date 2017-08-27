@@ -144,8 +144,8 @@ class ProjectController(app_manager.RyuApp):
                 if node in path:
                     in_port = path[node][0]
                     out_port = path[node][1]
-                    if (out_port, pw[i]) not in ports[in_port]:
-                        ports[in_port].append((out_port, pw[i]))
+                    if out_port not in ports[in_port]:
+                        ports[in_port].append(out_port)
                 i += 1
 
             for in_port in ports:
@@ -176,8 +176,8 @@ class ProjectController(app_manager.RyuApp):
 
                     buckets = []
                     # print "node at ",node," out ports : ",out_ports
-                    for port, weight in out_ports:
-                        bucket_weight = int(round((1 - weight/sum_of_pw) * 10))
+                    for port in out_ports:
+                        bucket_weight = 0
                         bucket_action = [ofp_parser.OFPActionOutput(port)]
                         buckets.append(
                             ofp_parser.OFPBucket(
@@ -190,13 +190,13 @@ class ProjectController(app_manager.RyuApp):
 
                     if group_new:
                         req = ofp_parser.OFPGroupMod(
-                            dp, ofp.OFPGC_ADD, ofp.OFPGT_SELECT, group_id,
+                            dp, ofp.OFPGC_ADD, ofp.OFPGT_FF, group_id,
                             buckets
                         )
                         dp.send_msg(req)
                     else:
                         req = ofp_parser.OFPGroupMod(
-                            dp, ofp.OFPGC_MODIFY, ofp.OFPGT_SELECT,
+                            dp, ofp.OFPGC_MODIFY, ofp.OFPGT_FF,
                             group_id, buckets)
                         dp.send_msg(req)
 
@@ -206,7 +206,7 @@ class ProjectController(app_manager.RyuApp):
                     self.add_flow(dp, 1, match_arp, actions)
 
                 elif len(out_ports) == 1:
-                    actions = [ofp_parser.OFPActionOutput(out_ports[0][0])]
+                    actions = [ofp_parser.OFPActionOutput(out_ports[0])]
 
                     self.add_flow(dp, 32768, match_ip, actions)
                     self.add_flow(dp, 1, match_arp, actions)
