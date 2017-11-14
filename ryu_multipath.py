@@ -28,7 +28,7 @@ REFERENCE_BW = 10000000
 
 DEFAULT_BW = 10000000
 
-MAX_PATHS = float('Inf')
+MAX_PATHS = 2
 
 class ProjectController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -341,4 +341,7 @@ class ProjectController(app_manager.RyuApp):
 
     @set_ev_cls(event.EventLinkDelete, MAIN_DISPATCHER)
     def link_delete_handler(self, event):
-        return
+        s1 = event.link.src
+        s2 = event.link.dst
+        del self.adjacency[s1.dpid][s2.dpid]
+        del self.adjacency[s2.dpid][s1.dpid]
