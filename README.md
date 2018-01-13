@@ -1,4 +1,6 @@
 # Multipath Routing SDN Controller
 
-Implementation of a Multipath Routing SDN Controller in Ryu (OpenFlow1.3) and Pyretic (OpenFlow 1.0).
+https://wildanmsyah.wordpress.com/2018/01/13/multipath-routing-with-load-balancing-using-ryu-openflow-controller/
+
+Implementation of a Multipath Routing SDN Controller in Ryu (OpenFlow1.3).
 
