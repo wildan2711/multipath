@@ -162,7 +162,7 @@ class ProjectController(app_manager.RyuApp):
                 )
 
                 out_ports = ports[in_port]
-                print out_ports 
+                # print out_ports 
 
                 if len(out_ports) > 1:
                     group_id = None
@@ -297,7 +297,7 @@ class ProjectController(app_manager.RyuApp):
                     out_port = self.install_paths(h1[0], h1[1], h2[0], h2[1], src_ip, dst_ip)
                     self.install_paths(h2[0], h2[1], h1[0], h1[1], dst_ip, src_ip) # reverse
 
-        print pkt
+        # print pkt
 
         actions = [parser.OFPActionOutput(out_port)]
 
