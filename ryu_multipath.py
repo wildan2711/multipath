@@ -311,8 +311,8 @@ class ProjectController(app_manager.RyuApp):
         datapath.send_msg(out)
 
     @set_ev_cls(event.EventSwitchEnter)
-    def switch_enter_handler(self, event):
-        switch = event.switch.dp
+    def switch_enter_handler(self, ev):
+        switch = ev.switch.dp
         ofp_parser = switch.ofproto_parser
 
         if switch.id not in self.switches:
@@ -324,24 +324,28 @@ class ProjectController(app_manager.RyuApp):
             switch.send_msg(req)
 
     @set_ev_cls(event.EventSwitchLeave, MAIN_DISPATCHER)
-    def switch_leave_handler(self, event):
-        print event
-        switch = event.switch.dp.id
+    def switch_leave_handler(self, ev):
+        print ev
+        switch = ev.switch.dp.id
         if switch in self.switches:
             self.switches.remove(switch)
             del self.datapath_list[switch]
             del self.adjacency[switch]
 
     @set_ev_cls(event.EventLinkAdd, MAIN_DISPATCHER)
-    def link_add_handler(self, event):
-        s1 = event.link.src
-        s2 = event.link.dst
+    def link_add_handler(self, ev):
+        s1 = ev.link.src
+        s2 = ev.link.dst
         self.adjacency[s1.dpid][s2.dpid] = s1.port_no
         self.adjacency[s2.dpid][s1.dpid] = s2.port_no
 
     @set_ev_cls(event.EventLinkDelete, MAIN_DISPATCHER)
-    def link_delete_handler(self, event):
-        s1 = event.link.src
-        s2 = event.link.dst
-        del self.adjacency[s1.dpid][s2.dpid]
-        del self.adjacency[s2.dpid][s1.dpid]
+    def link_delete_handler(self, ev):
+        s1 = ev.link.src
+        s2 = ev.link.dst
+        # Exception handling if switch already deleted
+        try:
+            del self.adjacency[s1.dpid][s2.dpid]
+            del self.adjacency[s2.dpid][s1.dpid]
+        except KeyError:
+            pass
