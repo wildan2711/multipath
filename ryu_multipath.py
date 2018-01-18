@@ -126,7 +126,7 @@ class ProjectController(app_manager.RyuApp):
         for path in paths:
             pw.append(self.get_path_cost(path))
             print path, "cost = ", pw[len(pw) - 1]
-        sum_of_pw = sum(pw)
+        sum_of_pw = sum(pw) * 1.0
         paths_with_ports = self.add_ports_to_paths(paths, first_port, last_port)
         switches_in_paths = set().union(*paths)
 
@@ -328,7 +328,7 @@ class ProjectController(app_manager.RyuApp):
         print event
         switch = event.switch.dp.id
         if switch in self.switches:
-            del self.switches[switch]
+            self.switches.remove(switch)
             del self.datapath_list[switch]
             del self.adjacency[switch]
 
